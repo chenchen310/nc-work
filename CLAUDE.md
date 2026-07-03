@@ -24,14 +24,16 @@ No build system, test framework, or linter is configured. Deps: `numpy`, `matplo
 (Python 3.8+).
 
 ```bash
-python3 coherent_defect_insertion.py   # runs the built-in self-test (physics + condition-table asserts)
-python3 visualize_defects.py           # regenerates fig1_interference_physics.png + fig2_condition_table.png
+python3 coherent_defect_insertion.py   # self-test: physics + condition-table + broadband asserts
+python3 whitened_matched_filter.py     # self-test: whitened MF beats white MF on colored noise
+python3 visualize_defects.py           # regenerates fig1 / fig2 / fig3
+python3 visualize_matched_filter.py    # regenerates fig4 (whitened matched filter)
 ```
 
-The `__main__` block in `coherent_defect_insertion.py` **is** the test suite — it
-asserts the core physics (phase 0 → bright center, phase π → dark center; sign flip)
-and the condition-table label logic. Extend those asserts rather than adding a
-separate framework. There is no single-test runner; run the whole file.
+Each module's `__main__` block **is** its test suite (`coherent_defect_insertion.py`:
+interference sign-flip, condition-table labels, broadband ring damping;
+`whitened_matched_filter.py`: detection-SNR / whitened-beats-white). Extend those
+asserts rather than adding a framework. There is no single-test runner; run the whole file.
 
 ## Architecture
 
@@ -79,6 +81,8 @@ vanish and the weak self-term dominates (a real, not artificial, effect).
 This is **Tier 1** (single coherent mode) — enough to close the "defect ≠ PSF" domain
 gap. **Tier 2** (SOCS partial coherence, `I=Σₖαₖ|φₖ⊗(O_bg+O_defect)|²`) needs the
 object field `O_bg` from design/GDS and a coherent-mode decomposition; only pursue it
-after Tier 1 is validated. A separate planned piece is a whitened matched-filter front
-end (estimate die-to-die noise covariance → whiten → correlate with the PSF-derived
-signature) as an extra U-Net input channel; it is not yet in this repo.
+after Tier 1 is validated. The whitened matched-filter detection front end now lives in
+`whitened_matched_filter.py` (spectral whitening by the estimated die-to-die noise PSD →
+matched-subspace `{Re(h), Im(h)}` statistic `T = z_re² + z_im²`); its `score` map is
+meant to be fed as an extra U-Net input channel. A remaining extension is full spatial
+whitening by a non-stationary per-pixel covariance (current whitening is spectral/stationary).

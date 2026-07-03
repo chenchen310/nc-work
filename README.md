@@ -37,6 +37,9 @@ I_new(x)   = |E_total(x)|²
 | `fig1_interference_physics.png` | 上排：同一顆 defect 只改相對相位 → 亮/雙極/暗；下排：同顆 defect 放到亮/邊/暗 → signature 隨 pattern 變。 |
 | `fig2_condition_table.png` | Condition Table (cond2/3/4) + 困難 nuisance 負例，每列顯示 target / reference / difference / label。 |
 | `fig3_broadband_vs_mono.png` | Mono-λ vs broadband：強度 PSF 與 defect ΔI 的外圈 ring 被洗掉；附 radial profile 對照。 |
+| `whitened_matched_filter.py` | §3 偵測前端：`estimate_noise_psd`、`build_psf_templates`、`whitened_matched_filter`（matched-subspace）。`python3` 直接跑會做自我測試。 |
+| `visualize_matched_filter.py` | 輸出 `fig4`：有色雜訊下 white vs whitened MF 對照。 |
+| `fig4_whitened_matched_filter.png` | difference / 估計 PSD / PSF template / raw / white MF / whitened MF；whitened 把 SNR<1 的 defect 拉出來。 |
 
 ## Quickstart
 
@@ -84,6 +87,34 @@ optics = dict(wavelength=270, NA=0.90, pixel_pitch=30.0, snr_range=(0.4, 1.2), b
 inp, label, meta = cdi.make_sample(target_img, ref_img, 2, optics, rng)  # 自動 broadband
 I_new, delta, info = cdi.insert_defect_broadband(I_bg, y, x, optics, z, phase, snr, band)
 ```
+
+## §3 Whitened matched filter（有色雜訊下的偵測前端）
+
+對「SNR<1、訊號形狀已知」的情況，最佳線性偵測器是**白化後的 matched filter**
+（Kay, *Detection Theory*）。承前向模型，difference image 的 defect 線性主項
+`2·sqrt(I_bg)·Re{a_d·h}` 落在 `span{Re(h), Im(h)}` 這個 2D 子空間（係數 = 未知
+複數 `a_d` → 亮/暗/雙極）。做法：
+
+1. **估有色 noise PSD**：`P_n(f) = E|FFT(d)|²`，由多張**無缺陷** difference（die-to-die）
+   的平均週期圖得到（`estimate_noise_psd`）。wafer noise 的能量集中在低頻與 pattern
+   頻率 → `P_n` 高度有色。
+2. **白化 + matched filter**：頻域用 `1/P_n(f)` 加權再與 template 相關，自動壓低
+   「雜訊強的頻率」、放大「compact PSF 有能量的中高頻」。
+3. **未知相位 → matched-subspace**：`T = z_re² + z_im²`（H0 下 ~ χ²₂），對亮/暗/雙極
+   皆敏感，不需知道 `a_d` 相位。`score = sqrt(T)` 可直接當偵測圖或 U-Net 的額外輸入通道。
+
+```python
+import numpy as np, whitened_matched_filter as wmf
+Pn = wmf.estimate_noise_psd(defect_free_diffs)          # (M,H,W) -> (H,W)
+templates = wmf.build_psf_templates(N, optics, zernike_waves=z)   # (Re h, Im h)
+out = wmf.whitened_matched_filter(target - reference, templates, Pn)
+score = out["score"]                                    # 高分 = 可能有 defect
+```
+
+自我測試（`python3 whitened_matched_filter.py`）：在有色雜訊下，把一顆 raw-SNR≈0.8
+的 sub-noise defect，用 whitened MF 拉到 ~160σ，且遠勝未白化的 white MF（~4σ）。
+絕對 σ 取決於背景乾淨度；可辯護的重點是 **whitened ≫ white**（白化在有色雜訊下的價值）。
+實務請把 template 換成 §2 量到的 PSF，並用真實 die-to-die pair 估 `P_n`。
 
 ## 限制與升級路徑
 
