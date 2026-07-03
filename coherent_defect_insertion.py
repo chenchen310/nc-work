@@ -169,6 +169,66 @@ def insert_defect(I_bg, y0, x0, optics, zernike_waves, rel_phase,
 
 
 # ---------------------------------------------------------------------------
+# 4b) Broadband (BBP) —— 對 λ 做「非相干疊加」
+#
+#   BBP 是 broadband：不同 λ 在時間平均感測器上不互相干涉，總影像 = 各 λ 強度
+#   影像的加權和。每個 λ 的 PSF ring 半徑 ∝ λ，疊起來 ring 互相抵消而洗平，
+#   中央 lobe (各 λ 同號) 保留。存活的 ring 數 ≈ λ̄/Δλ (分數頻寬倒數)。
+#
+#   實務近似：只量到 band 積分後的 I_bg，無法拆成 per-λ 背景，
+#   故各 λ 共用同一張 I_bg，但用自己的 h_λ (ring 半徑隨 λ 變 -> 自然洗掉外圈)。
+# ---------------------------------------------------------------------------
+def make_band(center, fwhm, n=9):
+    """回傳 [(wavelength_nm, weight), ...]，Gaussian 權重近似有效光譜 S(λ)。
+    請盡量以實測 S(λ)=source*T_optics*QE 取代；center 用 S(λ) 的強度加權質心。"""
+    lams = np.linspace(center - fwhm, center + fwhm, n)
+    sigma = fwhm / 2.3548                                   # FWHM -> sigma
+    w = np.exp(-0.5 * ((lams - center) / sigma) ** 2)
+    return [(float(lam), float(wi)) for lam, wi in zip(lams, w)]
+
+
+def insert_defect_broadband(I_bg, y0, x0, optics, zernike_waves, rel_phase,
+                            target_snr, bands, sigma_noise=None, A_d=None):
+    """Broadband 版插入。bands: [(wavelength_nm, weight), ...] (weight 不需先正規化)。
+    各 λ 共用同一張 I_bg，但用自己的 h_λ；band-summed ΔI 的局部 RMS 縮放到 target_snr。
+    A_d 若給定則沿用 (common-mode 重用)。回傳 (I_new, delta, info)。
+    """
+    E_bg = np.sqrt(np.clip(I_bg, 0.0, None)).astype(np.complex128)
+    ws = np.array([w for _, w in bands], dtype=float)
+    ws = ws / ws.sum()
+    fields = []                                            # [(w, E_unit_λ), ...]
+    for (lam, _), w in zip(bands, ws):
+        opt_l = dict(optics, wavelength=lam)               # 只換這個 λ
+        E_unit, _ = build_defect_field(I_bg.shape[0], y0, x0, rel_phase, opt_l, zernike_waves)
+        fields.append((w, E_unit))
+
+    def delta_at(A):                                       # band-summed ΔI (強度域相加)
+        d = np.zeros_like(I_bg, dtype=float)
+        for w, E_unit in fields:
+            d += w * (np.abs(E_bg + A * E_unit) ** 2 - I_bg)
+        return d
+
+    if A_d is None:
+        if sigma_noise is None:
+            sigma_noise = _local_std(I_bg, y0, x0)
+        target = target_snr * sigma_noise
+        rms = lambda A: _local_rms(delta_at(A), y0, x0)    # noqa: E731
+        lo, hi = 0.0, 1.0
+        while rms(hi) < target and hi < 1e6:
+            hi *= 2.0
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if rms(mid) < target else (lo, mid)
+        A_d = 0.5 * (lo + hi)
+
+    delta = delta_at(A_d)
+    I_new = I_bg + delta
+    info = dict(A_d=float(A_d), n_bands=len(bands),
+                delta_center=float(delta[int(round(y0)), int(round(x0))]))
+    return I_new, delta, info
+
+
+# ---------------------------------------------------------------------------
 # 5) 隨機化 (離焦/像差) + label map
 # ---------------------------------------------------------------------------
 def sample_aberration(rng, defocus=0.6, mid=0.15, high=0.08):
@@ -204,23 +264,33 @@ def make_sample(target_bg, ref_bg, condition, optics, rng, defect_loc=None):
     z = sample_aberration(rng)
     rel = rng.uniform(0.0, 2 * np.pi)
     snr = rng.uniform(*optics['snr_range'])
+    band = optics.get('band')                              # None => mono-λ；否則 broadband
 
     tgt, ref = target_bg.copy(), ref_bg.copy()
     label = np.zeros((N, N), np.float32)
-    kw = dict(optics=optics, zernike_waves=z, rel_phase=rel, target_snr=snr)
+
+    def _ins(img):
+        if band:
+            return insert_defect_broadband(img, y0, x0, optics, z, rel, snr, band)[0]
+        return insert_defect(img, y0, x0, optics=optics, zernike_waves=z,
+                             rel_phase=rel, target_snr=snr)[0]
 
     if condition == 2:                                     # target only -> Defect
-        tgt, _, _, _ = insert_defect(tgt, y0, x0, **kw)
-        label = gaussian_label(N, y0, x0)
+        tgt = _ins(tgt); label = gaussian_label(N, y0, x0)
     elif condition == 3:                                   # ref only -> No
-        ref, _, _, _ = insert_defect(ref, y0, x0, **kw)
+        ref = _ins(ref)
     elif condition == 4:                                   # both (同一顆) -> No
-        tgt, _, _, E_d = insert_defect(tgt, y0, x0, **kw)
-        ref, _, _, _ = insert_defect(ref, y0, x0, optics=optics, zernike_waves=z,
-                                     rel_phase=rel, target_snr=snr, E_d=E_d)
+        if band:
+            tgt, _, i4 = insert_defect_broadband(tgt, y0, x0, optics, z, rel, snr, band)
+            ref, _, _ = insert_defect_broadband(ref, y0, x0, optics, z, rel, snr, band, A_d=i4['A_d'])
+        else:
+            tgt, _, _, E_d = insert_defect(tgt, y0, x0, optics=optics, zernike_waves=z,
+                                           rel_phase=rel, target_snr=snr)
+            ref, _, _, _ = insert_defect(ref, y0, x0, optics=optics, zernike_waves=z,
+                                         rel_phase=rel, target_snr=snr, E_d=E_d)
 
     inp = np.stack([tgt, ref], axis=0).astype(np.float32)  # 2-channel U-Net input
-    meta = dict(cond=condition, y0=y0, x0=x0, snr=snr, rel_phase=rel, z=z)
+    meta = dict(cond=condition, y0=y0, x0=x0, snr=snr, rel_phase=rel, z=z, broadband=bool(band))
     return inp, label, meta
 
 
@@ -289,4 +359,20 @@ if __name__ == "__main__":
         inp, label, _ = make_sample(target_bg, ref_bg, cond, optics, rng, (90.0, 140.0))
         print(f"cond {cond}: label_sum={label.sum():8.2f} | "
               f"Δtarget={np.abs(inp[0]-target_bg).sum():8.2f} Δref={np.abs(inp[1]-ref_bg).sum():8.2f}")
+
+    print("\n=== broadband washes out rings (flat bg, phase=0) ===")
+    flat = np.ones((N, N))
+    band = make_band(center=270.0, fwhm=90.0, n=9)
+    _, d_mono, _, _ = insert_defect(flat, 128, 128, optics=optics,
+                                    zernike_waves={}, rel_phase=0.0, target_snr=1.0)
+    _, d_bb, _ = insert_defect_broadband(flat, 128, 128, optics, {}, 0.0, 1.0, band)
+    yy2, xx2 = np.mgrid[0:N, 0:N]
+    r = np.sqrt((yy2 - 128.0) ** 2 + (xx2 - 128.0) ** 2)
+    core, ringm = (r < 4), ((r >= 6) & (r < 18))
+    ratio = lambda d: float((d[ringm] ** 2).sum() / (d[core] ** 2).sum())
+    rm, rb = ratio(d_mono), ratio(d_bb)
+    print(f"ring/core energy: mono={rm:.3f}  broadband={rb:.3f}  (broadband 應較小)")
+    assert rb < rm
+    print("OK -> broadband 的外圈 ring 能量被壓低")
+
     print("\nALL CHECKS PASSED")
