@@ -33,15 +33,16 @@ I_new(x)   = |E_total(x)|²
 | 檔案 | 內容 |
 |------|------|
 | `coherent_defect_insertion.py` | 產生器函式庫：pupil/Zernike、相干插入 `insert_defect`、依 Condition Table 的 `make_sample`、困難負例 `make_nuisance_negative`。`python3 coherent_defect_insertion.py` 會跑自我測試。 |
-| `visualize_defects.py` | matplotlib 視覺化，輸出下述兩張圖。 |
+| `visualize_defects.py` | matplotlib 視覺化，輸出下述三張圖。 |
 | `fig1_interference_physics.png` | 上排：同一顆 defect 只改相對相位 → 亮/雙極/暗；下排：同顆 defect 放到亮/邊/暗 → signature 隨 pattern 變。 |
 | `fig2_condition_table.png` | Condition Table (cond2/3/4) + 困難 nuisance 負例，每列顯示 target / reference / difference / label。 |
+| `fig3_broadband_vs_mono.png` | Mono-λ vs broadband：強度 PSF 與 defect ΔI 的外圈 ring 被洗掉；附 radial profile 對照。 |
 
 ## Quickstart
 
 ```bash
 python3 coherent_defect_insertion.py   # 自我測試 (物理 + condition table)
-python3 visualize_defects.py           # 產生兩張 PNG
+python3 visualize_defects.py           # 產生三張 PNG
 ```
 
 ```python
@@ -64,6 +65,25 @@ neg_inp, neg_label, _ = cdi.make_nuisance_negative(target_img, ref_img, optics, 
 - **`h_ab` 應以「量到的 PSF」當底**（slanted-edge / design-based），Zernike 只作殘餘像差的 augmentation；
   別讓合成 PSF 比真實乾淨太多。
 - `sigma_noise`：建議餵入 §3 的 die-to-die per-pixel variance map，讓 SNR 縮放對齊真實局部雜訊。
+
+## Broadband (BBP)：對 λ 做非相干疊加
+
+BBP 是 broadband，不同 λ 在時間平均感測器上不互相干涉，總影像 = 各 λ 強度影像的加權和：
+
+```
+I_total(x) = Σ_k S(λ_k) · |h_{λ_k} ⊗ O|²,    S(λ) = source × T_optics × QE
+```
+
+- 每個 λ 的 PSF ring 半徑 ∝ λ，疊起來 ring 互相抵消而洗平；存活 ring 數 ≈ λ̄/Δλ（分數頻寬倒數）。
+- 單一 λ 會「太相干、ringing 偏多」；要準就用 `insert_defect_broadband`（`make_sample` 在 `optics['band']` 存在時會自動走 broadband）。
+- `wavelength` 若維持單值，填**有效光譜 S(λ) 的強度加權質心**（不是燈的全域範圍）。
+
+```python
+band = cdi.make_band(center=270, fwhm=90, n=9)   # 換成實測 S(λ)
+optics = dict(wavelength=270, NA=0.90, pixel_pitch=30.0, snr_range=(0.4, 1.2), band=band)
+inp, label, meta = cdi.make_sample(target_img, ref_img, 2, optics, rng)  # 自動 broadband
+I_new, delta, info = cdi.insert_defect_broadband(I_bg, y, x, optics, z, phase, snr, band)
+```
 
 ## 限制與升級路徑
 

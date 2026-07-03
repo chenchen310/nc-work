@@ -54,6 +54,52 @@ def _imshow(ax, img, title, cmap="gray", vlim=None, diverging=False):
     return im
 
 
+def radial_profile(img, cy, cx, rmax):
+    yy, xx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
+    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2).astype(int)
+    return np.array([img[r == k].mean() if np.any(r == k) else 0.0 for k in range(rmax)])
+
+
+def figure_broadband(target_bg):
+    half = 24
+    z = {4: 0.05}
+    band = cdi.make_band(center=270.0, fwhm=90.0, n=9)     # 換成你的實際 S(λ)
+    y0, x0 = 128.0, 120.0
+    c = N // 2
+    # 強度 PSF：mono vs broadband(Σ w|h_λ|²)
+    P, _ = cdi.aberrated_pupil(N, OPTICS['pixel_pitch'], OPTICS['wavelength'], OPTICS['NA'], z)
+    psf_mono = np.abs(cdi.amplitude_psf(P)) ** 2
+    psf_bb = np.zeros((N, N))
+    ws = np.array([w for _, w in band]); ws /= ws.sum()
+    for (lam, _), w in zip(band, ws):
+        Pl, _ = cdi.aberrated_pupil(N, OPTICS['pixel_pitch'], lam, OPTICS['NA'], z)
+        psf_bb += w * np.abs(cdi.amplitude_psf(Pl)) ** 2
+    # defect ΔI：mono vs broadband (同背景/位置/相位/SNR)
+    _, d_mono, _, _ = cdi.insert_defect(target_bg, y0, x0, optics=OPTICS,
+                                        zernike_waves=z, rel_phase=0.0, target_snr=1.0)
+    _, d_bb, _ = cdi.insert_defect_broadband(target_bg, y0, x0, OPTICS, z, 0.0, 1.0, band)
+    fig, ax = plt.subplots(2, 3, figsize=(12, 8), constrained_layout=True)
+    _imshow(ax[0, 0], np.log10(crop(psf_mono, c, c, half) + 1e-6), "mono-λ intensity PSF (log)", cmap="viridis")
+    _imshow(ax[0, 1], np.log10(crop(psf_bb, c, c, half) + 1e-6), "broadband intensity PSF (log)", cmap="viridis")
+    pm, pb = radial_profile(psf_mono, c, c, half), radial_profile(psf_bb, c, c, half)
+    ax[0, 2].semilogy(pm / pm.max(), label="mono-λ")
+    ax[0, 2].semilogy(pb / pb.max(), label="broadband")
+    ax[0, 2].set_title("PSF radial profile (rings damped)")
+    ax[0, 2].set_xlabel("radius [px]"); ax[0, 2].legend(); ax[0, 2].grid(True, which="both", alpha=0.3)
+    _imshow(ax[1, 0], crop(d_mono, y0, x0, half), "mono-λ  defect ΔI", diverging=True)
+    _imshow(ax[1, 1], crop(d_bb, y0, x0, half), "broadband  defect ΔI", diverging=True)
+    qm, qb = radial_profile(np.abs(d_mono), y0, x0, half), radial_profile(np.abs(d_bb), y0, x0, half)
+    ax[1, 2].semilogy(qm / qm.max(), label="mono-λ")
+    ax[1, 2].semilogy(qb / qb.max(), label="broadband")
+    ax[1, 2].set_title("|ΔI| radial profile")
+    ax[1, 2].set_xlabel("radius [px]"); ax[1, 2].legend(); ax[1, 2].grid(True, which="both", alpha=0.3)
+    fig.suptitle("Fig.3  Mono-λ vs Broadband   |   broadband = incoherent sum over λ "
+                 "-> outer rings wash out (surviving rings ~ λ/Δλ)", fontsize=10)
+    out = "fig3_broadband_vs_mono.png"
+    fig.savefig(out, dpi=130); plt.close(fig)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Figure 1 : 干涉物理
 # ---------------------------------------------------------------------------
@@ -149,5 +195,7 @@ if __name__ == "__main__":
 
     f1 = figure_interference(target_bg)
     f2 = figure_condition_table(target_bg, ref_bg)
+    f3 = figure_broadband(target_bg)
     print("saved:", f1)
     print("saved:", f2)
+    print("saved:", f3)
